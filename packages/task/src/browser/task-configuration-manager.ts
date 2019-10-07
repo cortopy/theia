@@ -19,10 +19,11 @@ import { inject, injectable, postConstruct } from 'inversify';
 import URI from '@theia/core/lib/common/uri';
 import { Emitter, Event } from '@theia/core/lib/common/event';
 import { EditorManager, EditorWidget } from '@theia/editor/lib/browser';
-import { PreferenceService } from '@theia/core/lib/browser';
+import { PreferenceService, PreferenceScope } from '@theia/core/lib/browser';
 import { QuickPickService } from '@theia/core/lib/common/quick-pick-service';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
 import { TaskConfigurationModel } from './task-configuration-model';
+import { getTemplates } from './task-templates';
 import { TaskCustomization, TaskConfiguration } from '../common/task-protocol';
 import { WorkspaceVariableContribution } from '@theia/workspace/lib/browser/workspace-variable-contribution';
 import { FileSystem, FileSystemError } from '@theia/filesystem/lib/common';
@@ -63,6 +64,9 @@ export class TaskConfigurationManager {
             if (e.preferenceName === 'tasks') {
                 this.updateModels();
             }
+        });
+        this.workspaceService.onWorkspaceChanged(() => {
+            this.updateModels();
         });
     }
 
@@ -153,39 +157,44 @@ export class TaskConfigurationManager {
     }
 
     protected async doCreate(model: TaskConfigurationModel): Promise<URI> {
-        await this.preferences.set('tasks', {}); // create dummy tasks.json in the correct place
-        const { configUri } = this.preferences.resolve('tasks'); // get uri to write content to it
+        await this.preferences.set('tasks', {}, PreferenceScope.Folder, model.workspaceFolderUri); // create dummy tasks.json in the correct place
+        const { configUri } = this.preferences.resolve('tasks', [], model.workspaceFolderUri); // get uri to write content to it
         let uri: URI;
         if (configUri && configUri.path.base === 'tasks.json') {
             uri = configUri;
         } else { // fallback
             uri = new URI(model.workspaceFolderUri).resolve(`${this.preferenceConfigurations.getPaths()[0]}/tasks.json`);
         }
-        const content = this.getInitialConfigurationContent();
+
         const fileStat = await this.filesystem.getFileStat(uri.toString());
         if (!fileStat) {
             throw new Error(`file not found: ${uri.toString()}`);
         }
+
+        const content = await this.getInitialConfigurationContent();
         try {
-            await this.filesystem.setContent(fileStat, content);
+            if (content) {
+                this.filesystem.setContent(fileStat, content);
+            } else {
+                this.filesystem.delete(uri.toString());
+            }
         } catch (e) {
             if (!FileSystemError.FileExists.is(e)) {
                 throw e;
             }
         }
+
         return uri;
     }
 
-    protected getInitialConfigurationContent(): string {
-        return `{
-  // Use IntelliSense to learn about possible attributes.
-  // Hover to view descriptions of existing attributes.
-  "version": "2.0.0",
-  "tasks": ${JSON.stringify([], undefined, '  ').split('\n').map(line => '  ' + line).join('\n').trim()}
-}
-`;
+    protected async getInitialConfigurationContent(): Promise<string | undefined> {
+        const selected = await this.quickPick.show(getTemplates(), {
+            placeholder: 'Select a Task Template'
+        });
+        if (selected) {
+            return selected.content;
+        }
     }
-
 }
 
 export namespace TaskConfigurationManager {
